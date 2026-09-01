@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AC-130 // DEFEND POSITION</title>
+<style>
+  :root { --hud: #f2f2f2; }
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden;
+    font-family: "DIN Alternate", "Bahnschrift", "Avenir Next Condensed", "Roboto Condensed", "Arial Narrow", Arial, sans-serif;
+    color: var(--hud); user-select: none; -webkit-user-select: none; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #scene { z-index: 1; background:#000; }
+  #scene.bhot { filter: invert(1); }
+  #hud { z-index: 2; pointer-events: none; }
+  #playfield { position: fixed; inset: 0; z-index: 3; cursor: none; }
+  #overlay { position: fixed; inset: 0; z-index: 10; display: flex; align-items: center; justify-content: center;
+    background: radial-gradient(ellipse at center, #0b0b0b 0%, #000 75%); }
+  #overlay::after { content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(0deg, rgba(255,255,255,0.03) 0 1px, transparent 1px 3px); }
+  .panel { position: relative; z-index: 1; width: min(720px, 92vw); border: 1px solid #3a3a3a; padding: 28px 34px; background: rgba(8,8,8,0.92);
+    box-shadow: 0 0 60px rgba(255,255,255,0.05) inset; }
+  .panel h1 { margin: 0 0 4px; font-size: 34px; letter-spacing: 0.14em; font-weight: 600; }
+  .panel h1 small { display:block; font-size: 13px; letter-spacing: 0.3em; color:#9a9a9a; margin-top: 4px; }
+  .panel p { color: #b8b8b8; line-height: 1.5; font-size: 15px; margin: 14px 0; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin: 12px 0; }
+  button, input { font: inherit; letter-spacing: 0.08em; }
+  button { background: #101010; color: var(--hud); border: 1px solid #6a6a6a; padding: 12px 18px; cursor: pointer; text-transform: uppercase; font-size: 15px; }
+  button:hover { background: #f2f2f2; color: #000; }
+  button.primary { border-color: #f2f2f2; }
+  button:disabled { opacity: 0.4; cursor: default; }
+  input { background: #050505; color: var(--hud); border: 1px solid #4a4a4a; padding: 12px 14px; flex: 1; min-width: 200px; outline: none; }
+  .status { min-height: 22px; font-size: 14px; color: #8fd18f; letter-spacing: 0.1em; }
+  .status.err { color: #e08080; }
+  .bar { height: 6px; background: #1a1a1a; border: 1px solid #333; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; width: 0%; background: #ddd; transition: width .15s linear; }
+  .controls { display: grid; grid-template-columns: auto 1fr; gap: 4px 18px; font-size: 13px; color: #9a9a9a; margin-top: 14px; }
+  .controls b { color: #ddd; font-weight: 600; letter-spacing: 0.1em; }
+  .hidden { display: none !important; }
+  .attrib { position: fixed; right: 8px; bottom: 4px; z-index: 4; font-size: 10px; color: rgba(255,255,255,0.35); letter-spacing: 0.05em; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="scene"></canvas>
+<canvas id="hud"></canvas>
+<div id="playfield"></div>
+<div class="attrib">IMAGERY: ESRI, MAXAR, EARTHSTAR GEOGRAPHICS · SIMULATION</div>
+
+<div id="overlay">
+  <div class="panel">
+    <h1>AC-130 GUNSHIP<small>DEFEND POSITION // ANGEL FLIGHT</small></h1>
+    <div id="menu">
+      <p>Hostile forces are converging on <b>your current position</b>. The gunship's IR sensor is slaved to a live satellite picture of wherever you are. Hold them off.</p>
+      <div class="row">
+        <button class="primary" id="btnGeo">Acquire my position (GPS)</button>
+        <button id="btnDemo">Use demo position</button>
+      </div>
+      <div class="row">
+        <input id="placeInput" placeholder="…or type a place / address" autocomplete="off">
+        <button id="btnPlace">Search</button>
+      </div>
+      <div class="status" id="menuStatus"></div>
+      <div class="controls">
+        <b>MOUSE</b><span>slew sensor (crosshair stays centred, like the real gimbal)</span>
+        <b>LMB</b><span>fire selected weapon</span>
+        <b>1 / 2 · RMB</b><span>25 mm Gatling  /  105 mm howitzer</span>
+        <b>Z · WHEEL</b><span>sensor zoom</span>
+        <b>B</b><span>white-hot / black-hot</span>
+        <b>P · M · R</b><span>pause · mute · restart</span>
+      </div>
+    </div>
+    <div id="loading" class="hidden">
+      <p id="loadText">ACQUIRING SATELLITE FEED…</p>
+      <div class="bar"><i id="loadBar"></i></div>
+      <div class="status" id="loadStatus"></div>
+    </div>
+    <div id="ready" class="hidden">
+      <p id="readyText">Sensor locked. Position confirmed.</p>
+      <div class="row"><button class="primary" id="btnEngage">Engage</button></div>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+'use strict';
+// ───────────────────────── CONFIG ─────────────────────────
+const Z = 18;                 // tile zoom
+const N = 14;                 // world = N*256 px square
+const TILE = 256;
+const WORLD = N * TILE;
+const TILE_URL = (z, x, y) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
+const DEMO = { lat: 34.0505, lon: -118.2488, name: 'DEMO // LOS ANGELES' };
+
+// ───────────────────────── DOM ─────────────────────────
+const $ = id => document.getElementById(id);
+const sceneCv = $('scene'), hudCv = $('hud'), playfield = $('playfield');
+const sctx = sceneCv.getContext('2d'), hctx = hudCv.getContext('2d');
+const overlay = $('overlay');
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(1.5, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  for (const c of [sceneCv, hudCv]) { c.width = Math.round(W * DPR); c.height = Math.round(H * DPR); }
+  computeCoverage(); buildVignette();
+}
+window.addEventListener('resize', resize);
+let vignetteCv = null;
+function buildVignette() {
+  vignetteCv = document.createElement('canvas'); vignetteCv.width = Math.max(1, Math.round(W / 2)); vignetteCv.height = Math.max(1, Math.round(H / 2));
+  const v = vignetteCv.getContext('2d'), w = vignetteCv.width, h = vignetteCv.height;
+  const g = v.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.35, w / 2, h / 2, Math.hypot(w, h) * 0.6);
+  g.addColorStop(0, 'rgba(0,0,0,0)'); g.addColorStop(1, 'rgba(0,0,0,0.75)'); v.fillStyle = g; v.fillRect(0, 0, w, h);
+}
+
+// ───────────────────────── STATE ─────────────────────────
+const G = {
+  mode: 'menu', muted: false, polarity: 'WHOT',
+  loc: { lat: 0, lon: 0, name: '' },
+  world: null, // thermal world canvas
+  base: { x: WORLD / 2, y: WORLD / 2, hp: 100, maxHp: 100 },
+  cam: { x: WORLD / 2, y: WORLD / 2, angle: 0, s0: 1, zoom: 1, s: 1 },
+  rMax: 600, mouse: { x: 0, y: 0, down: false },
+  time: 0, wave: 0, score: 0, kills: 0, waveState: 'idle', waveTimer: 0,
+  enemies: [], marks: [], fx: [], shots: [], spawnQueue: [],
+  weapon: 0, heat: 0, overheated: false, reload: 0, shellInFlight: false, gunAcc: 0,
+  shake: 0, white: 0, glitch: 0, glitchT: 0,
+  subtitle: { text: '', t: 0, who: '' }, subQueue: [], lastRadio: 0,
+  paused: false, alt: 5089, spreadT: 0, grid: '',
+};
+const WEAPONS = [
+  { name: '25 mm', rpm: 720, spread: 15, travel: 0.32, splash: 16 },
+  { name: '105 mm', reload: 5.0, travel: 1.7, splash: 125 },
+];
+const ETYPES = {
+  inf:  { r: 5,  len: 0,  speed: 34, hp: 1,   range: [130, 180], rate: 2.4, dmg: 0.08, score: 100, label: 'INF' },
+  tech: { r: 9,  len: 22, speed: 62, hp: 5,   range: [200, 260], rate: 6,   dmg: 0.11, score: 350, label: 'TECHNICAL' },
+  apc:  { r: 12, len: 30, speed: 36, hp: 14,  range: [230, 300], rate: 4,   dmg: 0.32, score: 800, label: 'APC' },
+  truck:{ r: 10, len: 30, speed: 50, hp: 6,   range: [300, 360], rate: 0,   dmg: 0,    score: 500, label: 'TRUCK', carries: 6 },
+  tank: { r: 14, len: 40, speed: 27, hp: 20,  range: [270, 340], rate: 0.4, dmg: 1.7,  score: 1500, label: 'TANK' },
+};
+const GUN_DMG = { inf: 1, tech: 1, truck: 1, apc: 0.35, tank: 0.2 };
+
+function computeCoverage() {
+  const diag = Math.hypot(W, H);
+  G.cam.s0 = Math.max(1, diag / 2000);
+  G.cam.s = G.cam.s0 * G.cam.zoom;
+  // camera may wander this far from base without exposing the world edge (at zoom 1)
+  G.rMax = Math.max(220, WORLD / 2 - diag / (2 * G.cam.s0) - 40);
+}
+
+// ───────────────────────── GEO / TILES ─────────────────────────
+function lonLatToTile(lon, lat, z) {
+  const n = 2 ** z;
+  const x = (lon + 180) / 360 * n;
+  const lr = lat * Math.PI / 180;
+  const y = (1 - Math.log(Math.tan(lr) + 1 / Math.cos(lr)) / Math.PI) / 2 * n;
+  return { x, y };
+}
+function setLoad(txt, pct, status, err) {
+  if (txt != null) $('loadText').textContent = txt;
+  if (pct != null) $('loadBar').style.width = (pct * 100).toFixed(1) + '%';
+  if (status != null) { $('loadStatus').textContent = status; $('loadStatus').classList.toggle('err', !!err); }
+}
+async function loadWorld(lat, lon) {
+  $('menu').classList.add('hidden'); $('loading').classList.remove('hidden');
+  const t = lonLatToTile(lon, lat, Z);
+  const ox = t.x - N / 2, oy = t.y - N / 2;   // fractional tile origin → base lands exactly at world centre
+  const cv = document.createElement('canvas'); cv.width = cv.height = WORLD;
+  const ctx = cv.getContext('2d', { willReadFrequently: true });
+  ctx.fillStyle = '#1a1a1a'; ctx.fillRect(0, 0, WORLD, WORLD);
+  const jobs = [];
+  const x0 = Math.floor(ox), y0 = Math.floor(oy), maxT = 2 ** Z;
+  let done = 0, total = (N + 1) * (N + 1), failed = 0;
+  for (let j = 0; j <= N; j++) for (let i = 0; i <= N; i++) {
+    const tx = x0 + i, ty = y0 + j;
+    const dx = (tx - ox) * TILE, dy = (ty - oy) * TILE;
+    jobs.push(new Promise(res => {
+      if (ty < 0 || ty >= maxT) { done++; return res(); }
+      const img = new Image(); img.crossOrigin = 'anonymous';
+      img.onload = () => { try { ctx.drawImage(img, dx, dy, TILE, TILE); } catch (e) {} done++; res(); };
+      img.onerror = () => { failed++; done++; res(); };
+      img.src = TILE_URL(Z, ((tx % maxT) + maxT) % maxT, ty);
+    }));
+  }
+  const tick = setInterval(() => setLoad(null, done / total * 0.85, `TILES ${done}/${total}`), 100);
+  await Promise.all(jobs); clearInterval(tick);
+  setLoad('PROCESSING IR RETURN…', 0.88, failed ? `${failed} tiles unavailable` : '');
+  await new Promise(r => setTimeout(r, 30));
+  thermalize(cv, ctx);
+  setLoad('CALIBRATING SENSOR…', 0.96, '');
+  await new Promise(r => setTimeout(r, 30));
+  postProcess(cv, ctx);
+  G.world = cv;
+  setLoad('SENSOR LOCKED', 1, '');
+  $('loading').classList.add('hidden'); $('ready').classList.remove('hidden');
+  $('readyText').textContent = `Sensor locked on ${G.loc.name || 'your position'} (${G.grid}). Hostiles are moving in. Defend the friendly position at the centre of your picture.`;
+}
+// Turn RGB satellite imagery into a white-hot IR picture
+function thermalize(cv, ctx) {
+  const img = ctx.getImageData(0, 0, WORLD, WORLD), d = img.data;
+  for (let p = 0; p < d.length; p += 4) {
+    const r = d[p], g = d[p + 1], b = d[p + 2];
+    const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+    const mx = Math.max(r, g, b), mn = Math.min(r, g, b), sat = mx - mn;
+    const green = g - (r + b) * 0.5, blue = b - (r + g) * 0.5;
+    let v = lum;
+    if (green > 6) v = v * 0.62 - green * 0.6;                    // vegetation reads cold & dark
+    if (blue > 10) v = v * 0.42;                                  // water: dark
+    if (sat < 34 && lum > 105) v = v * 1.05 + 8;                   // concrete / asphalt / roofs: warm
+    else if (sat < 34 && lum < 60) v = v * 0.7;                    // shadows: very cold
+    v = 128 + 127 * Math.tanh((v - 118) / 125);                   // soft-knee contrast: no hard clipping
+    v = 28 + v * 0.6;                                             // ground tops out around 180 so bodies and engines (255) stand out
+    v += (Math.random() - 0.5) * 14;                              // sensor noise
+    v = v < 0 ? 0 : v > 255 ? 255 : v;
+    d[p] = d[p + 1] = d[p + 2] = v;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function postProcess(cv, ctx) {
+  if (!('filter' in ctx)) return;
+  // soft optics + IR bloom on hot surfaces
+  const small = document.createElement('canvas'); small.width = small.height = WORLD / 4;
+  const sc = small.getContext('2d');
+  sc.filter = 'blur(5px) brightness(1.1)'; sc.drawImage(cv, 0, 0, small.width, small.height);
+  ctx.filter = 'blur(0.7px)'; ctx.drawImage(cv, 0, 0); ctx.filter = 'none';
+  ctx.globalCompositeOperation = 'lighter'; ctx.globalAlpha = 0.1;
+  ctx.drawImage(small, 0, 0, WORLD, WORLD);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// ───────────────────────── SPRITES ─────────────────────────
+function glowSprite(size, core, softness = 1) {
+  const c = document.createElement('canvas'); c.width = c.height = size;
+  const x = c.getContext('2d'), r = size / 2;
+  const g = x.createRadialGradient(r, r, 0, r, r, r);
+  g.addColorStop(0, 'rgba(255,255,255,1)');
+  g.addColorStop(core, 'rgba(255,255,255,0.95)');
+  g.addColorStop(Math.min(1, core + 0.25 * softness), 'rgba(255,255,255,0.35)');
+  g.addColorStop(1, 'rgba(255,255,255,0)');
+  x.fillStyle = g; x.fillRect(0, 0, size, size);
+  return c;
+}
+const SPR = {
+  inf: glowSprite(28, 0.18), flash: glowSprite(64, 0.1), big: glowSprite(256, 0.42, 1.6), fire: glowSprite(256, 0.6, 1.2),
+  dot: glowSprite(16, 0.3), soft: glowSprite(128, 0.02, 2.5), round: glowSprite(64, 0.5, 1.2),
+};
+// Pre-rendered IR signatures. Drawn at 4x, blurred, so edges are soft the way a real FLIR renders them.
+const SS = 4;
+function unitSprite(len, wid, draw) {
+  const pad = 10, w = Math.ceil((len + pad * 2) * SS), h = Math.ceil((wid + pad * 2) * SS);
+  const c = document.createElement('canvas'); c.width = w; c.height = h; const x = c.getContext('2d');
+  x.translate(w / 2, h / 2); x.scale(SS, SS); draw(x);
+  if ('filter' in x) { const b = document.createElement('canvas'); b.width = w; b.height = h; const bx = b.getContext('2d');
+    bx.filter = `blur(${SS * 0.55}px)`; bx.drawImage(c, 0, 0); bx.filter = 'none'; bx.globalAlpha = 0.55; bx.drawImage(c, 0, 0); return { cv: b, w: w / SS, h: h / SS }; }
+  return { cv: c, w: w / SS, h: h / SS };
+}
+const gray = v => `rgb(${v},${v},${v})`;
+function ell(x, cx, cy, rx, ry, v, rot = 0) { x.fillStyle = gray(v); x.beginPath(); x.ellipse(cx, cy, rx, ry, rot, 0, 6.28); x.fill(); }
+function rrect(x, cx, cy, w, h, r, v) { x.fillStyle = gray(v); x.beginPath(); x.roundRect(cx - w / 2, cy - h / 2, w, h, r); x.fill(); }
+// infantry walk cycle (4 frames), seen from directly above: head hottest, torso, swinging limbs
+const INF_FR = [0, 1, 2, 3].map(f => unitSprite(12, 8, x => {
+  const ph = f / 4 * Math.PI * 2, sw = Math.sin(ph);
+  ell(x, -2.2 + sw * 2.2, 1.5, 1.6, 0.9, 205, 0.15); ell(x, -2.2 - sw * 2.2, -1.5, 1.6, 0.9, 205, -0.15);      // legs
+  ell(x, 0.4 - sw * 1.6, 2.4, 1.3, 0.8, 190); ell(x, 0.4 + sw * 1.6, -2.4, 1.3, 0.8, 190);                       // arms
+  ell(x, 0, 0, 3.0, 2.2, 232); ell(x, -1.2, 0, 1.8, 1.9, 215);                                                    // shoulders / torso
+  ell(x, 1.6, 0, 1.35, 1.35, 255);                                                                                // head
+}));
+const VEH = {
+  tech: unitSprite(22, 10, x => {
+    rrect(x, 0, 0, 22, 9.4, 1.5, 200);                     // body
+    rrect(x, 7, 0, 7, 8.6, 1.2, 230); rrect(x, 8, 0, 4.5, 6.5, 1, 255);   // hood + hot engine
+    rrect(x, 1.5, 0, 5, 8.4, 1, 170); rrect(x, 1.5, 0, 3.6, 7, 0.8, 110);  // cab, cold glass
+    rrect(x, -5.5, 0, 9, 8, 0.8, 185);                     // bed
+    ell(x, -6, 0, 1.6, 1.6, 245); x.fillStyle = gray(200); x.fillRect(-6, -0.5, 8, 1);   // gunner + barrel
+    for (const wx of [-7, 6.5]) for (const wy of [-4.6, 4.6]) ell(x, wx, wy, 2, 1.1, 240);   // warm tyres
+    ell(x, -12, 2.5, 2.4, 1.3, 190);                       // exhaust plume
+  }),
+  truck: unitSprite(30, 12, x => {
+    rrect(x, 0, 0, 30, 10.5, 1.5, 185);
+    rrect(x, 11, 0, 7, 10, 1.2, 230); rrect(x, 12, 0, 4.5, 7.5, 1, 255);        // engine
+    rrect(x, 6, 0, 4, 9.5, 1, 165); rrect(x, 6, 0, 2.6, 8, 0.8, 110);          // cab
+    rrect(x, -5, 0, 18, 10.5, 1, 175); rrect(x, -5, 0, 16, 8.5, 0.8, 160);      // canvas cover (cooler)
+    for (const wx of [-11, -6, 10]) for (const wy of [-5.4, 5.4]) ell(x, wx, wy, 2.2, 1.2, 240);
+    ell(x, -16.5, 3, 2.6, 1.4, 185);
+  }),
+  apc: unitSprite(30, 14, x => {
+    rrect(x, 0, 0, 30, 13, 3, 200);
+    for (const wy of [-5.6, 5.6]) for (const wx of [-10, -3.5, 3.5, 10]) ell(x, wx, wy, 2.6, 1.4, 245);   // 8 wheels, warm
+    rrect(x, -9, 0, 9, 10, 2, 255); rrect(x, -9, 0, 6, 7, 1.5, 240);                                   // engine deck (rear)
+    rrect(x, 10, 0, 8, 10.5, 2, 185);                                                                   // sloped front
+    ell(x, 1, 0, 4.2, 4.2, 215); x.fillStyle = gray(225); x.fillRect(1, -0.8, 12, 1.6); ell(x, 1, 0, 2.2, 2.2, 235); // turret + gun
+    ell(x, -16.5, -3.5, 2.6, 1.6, 200);
+  }),
+  tank: unitSprite(40, 18, x => {
+    for (const wy of [-7, 7]) { rrect(x, 0, wy, 40, 4.2, 1, 225); for (let i = -4; i <= 4; i++) ell(x, i * 4.3, wy, 1.6, 1.6, 245); }   // tracks, hot from rolling
+    rrect(x, 0, 0, 38, 11, 2, 210);                                                                       // hull
+    rrect(x, -13, 0, 10, 10.5, 1.5, 255); rrect(x, -13, 0, 7, 7.5, 1, 235); for (let i = -3; i <= 3; i += 2) x.fillRect(-16.5 + (i + 3) * 1.4, -4.5, 0.6, 9); // engine deck + louvres
+    ell(x, 2, 0, 7.2, 6.4, 210); ell(x, 2, 0, 5.5, 4.8, 200);                                             // turret
+    x.fillStyle = gray(215); x.fillRect(6, -1.1, 22, 2.2); ell(x, 28, 0, 1.4, 1.8, 235);                   // main gun + muzzle
+    ell(x, -0.5, 4.8, 1.6, 1.4, 200); ell(x, -22, 4.5, 3.2, 2, 195);                                      // hatch, exhaust
+  }),
+};
+const noiseCv = document.createElement('canvas'); noiseCv.width = noiseCv.height = 256;
+{ const x = noiseCv.getContext('2d'); const im = x.createImageData(256, 256);
+  for (let p = 0; p < im.data.length; p += 4) { const v = Math.random() * 255; im.data[p] = im.data[p+1] = im.data[p+2] = v; im.data[p+3] = 255; }
+  x.putImageData(im, 0, 0); }
+let noisePat = null;
+
+// ───────────────────────── AUDIO ─────────────────────────
+const AU = { ctx: null, master: null, noiseBuf: null, radio: null, squelch: null };
+function audioInit() {
+  if (AU.ctx) return;
+  const C = new (window.AudioContext || window.webkitAudioContext)();
+  AU.ctx = C; AU.master = C.createGain(); AU.master.gain.value = 0.6; AU.master.connect(C.destination);
+  const len = C.sampleRate * 2, buf = C.createBuffer(1, len, C.sampleRate), ch = buf.getChannelData(0);
+  for (let i = 0; i < len; i++) ch[i] = Math.random() * 2 - 1;
+  AU.noiseBuf = buf;
+  // radio / intercom bus: band-limited, overdriven, compressed — everything the crew hears comes through the headset
+  const inp = C.createGain(); inp.gain.value = 1.6;
+  const hp = C.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 380; hp.Q.value = 0.9;
+  const lp = C.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 3100; lp.Q.value = 1.1;
+  const pk = C.createBiquadFilter(); pk.type = 'peaking'; pk.frequency.value = 1700; pk.gain.value = 5; pk.Q.value = 1;
+  const ws = C.createWaveShaper(); { const n = 2048, cur = new Float32Array(n), k = 14; for (let i = 0; i < n; i++) { const v = i * 2 / n - 1; cur[i] = (1 + k) * v / (1 + k * Math.abs(v)); } ws.curve = cur; ws.oversample = '2x'; }
+  const cmp = C.createDynamicsCompressor(); cmp.threshold.value = -28; cmp.ratio.value = 10; cmp.attack.value = 0.002; cmp.release.value = 0.12; cmp.knee.value = 6;
+  const out = C.createGain(); out.gain.value = 0.55;
+  inp.connect(hp); hp.connect(lp); lp.connect(pk); pk.connect(ws); ws.connect(cmp); cmp.connect(out); out.connect(AU.master);
+  AU.radio = inp;
+  // squelch bed: static that opens whenever the channel keys up
+  const sq = C.createBufferSource(); sq.buffer = buf; sq.loop = true;
+  const sqf = C.createBiquadFilter(); sqf.type = 'bandpass'; sqf.frequency.value = 2400; sqf.Q.value = 0.6;
+  const sqg = C.createGain(); sqg.gain.value = 0; sq.connect(sqf); sqf.connect(sqg); sqg.connect(AU.master); sq.start();
+  AU.squelch = sqg;
+  // ambient: engine drone + sensor hiss
+  const drone = C.createGain(); drone.gain.value = 0.05; drone.connect(AU.master);
+  for (const f of [46, 69, 92.5]) { const o = C.createOscillator(); o.type = 'sawtooth'; o.frequency.value = f;
+    const lp = C.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 220; o.connect(lp); lp.connect(drone); o.start(); }
+  const lfo = C.createOscillator(); lfo.frequency.value = 0.9; const lg = C.createGain(); lg.gain.value = 0.02; lfo.connect(lg); lg.connect(drone.gain); lfo.start();
+  const hiss = C.createBufferSource(); hiss.buffer = buf; hiss.loop = true;
+  const bp = C.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = 1800; bp.Q.value = 0.5;
+  const hg = C.createGain(); hg.gain.value = 0.012; hiss.connect(bp); bp.connect(hg); hg.connect(AU.master); hiss.start();
+}
+function keyUp(delay = 0, dur = 0.2, level = 0.05) {   // squelch opens with each transmission
+  const C = AU.ctx, t = C.currentTime + delay, g = AU.squelch.gain;
+  g.cancelScheduledValues(t); g.setValueAtTime(level, t); g.setValueAtTime(level, t + dur); g.linearRampToValueAtTime(0, t + dur + 0.08);
+}
+function noiseBurst({ dur = 0.1, gain = 0.4, type = 'bandpass', freq = 1000, q = 1, delay = 0, freqEnd = null, bus = null }) {
+  if (!AU.ctx || G.muted) return; const C = AU.ctx, t = C.currentTime + delay; bus = bus || AU.radio;
+  const s = C.createBufferSource(); s.buffer = AU.noiseBuf; s.loop = true;
+  const f = C.createBiquadFilter(); f.type = type; f.frequency.setValueAtTime(freq, t); f.Q.value = q;
+  if (freqEnd) f.frequency.exponentialRampToValueAtTime(freqEnd, t + dur);
+  const g = C.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  s.connect(f); f.connect(g); g.connect(bus); s.start(t); s.stop(t + dur + 0.05);
+}
+function tone({ f0 = 60, f1 = 25, dur = 0.5, gain = 0.5, type = 'sine', delay = 0, bus = null }) {
+  if (!AU.ctx || G.muted) return; const C = AU.ctx, t = C.currentTime + delay; bus = bus || AU.radio;
+  const o = C.createOscillator(); o.type = type; o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(f1, t + dur);
+  const g = C.createGain(); g.gain.setValueAtTime(gain, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(bus); o.start(t); o.stop(t + dur + 0.05);
+}
+const SFX = {
+  gun() { if (!AU.ctx || G.muted) return; keyUp(0, 0.12, 0.035);
+    noiseBurst({ dur: 0.018, gain: 1.4, type: 'highpass', freq: 900 });                       // hard transient — clips on the bus
+    noiseBurst({ dur: 0.06, gain: 0.7, freq: 950 + Math.random() * 300, q: 0.7 });            // report
+    tone({ f0: 320, f1: 110, dur: 0.045, gain: 0.5, type: 'square' }); },                     // mechanical thump
+  gunHit(d) { noiseBurst({ dur: 0.1, gain: 0.25, type: 'bandpass', freq: 600, q: 0.8, delay: d }); },
+  shot105() { if (!AU.ctx || G.muted) return; keyUp(0, 0.7, 0.06);
+    noiseBurst({ dur: 0.05, gain: 2.0, type: 'highpass', freq: 500 }); noiseBurst({ dur: 0.5, gain: 1.4, type: 'lowpass', freq: 900, freqEnd: 200 });
+    tone({ f0: 160, f1: 40, dur: 0.6, gain: 1.2 }); tone({ f0: 90, f1: 30, dur: 0.9, gain: 0.8, bus: AU.master }); },   // airframe shudder stays off-radio
+  impact105(d) { if (!AU.ctx || G.muted) return; keyUp(d, 1.4, 0.07);
+    noiseBurst({ dur: 1.8, gain: 2.2, type: 'lowpass', freq: 700, freqEnd: 90, delay: d }); noiseBurst({ dur: 0.4, gain: 1.2, freq: 1500, q: 0.5, delay: d + 0.05 });
+    tone({ f0: 120, f1: 20, dur: 1.5, gain: 1.4, delay: d }); },
+  radio() { if (!AU.ctx || G.muted) return; keyUp(0, 0.25, 0.06); noiseBurst({ dur: 0.09, gain: 0.3, freq: 2200, q: 0.7 }); tone({ f0: 1200, f1: 1150, dur: 0.05, gain: 0.12, type: 'square', delay: 0.09 }); },
+  enemyShot() { noiseBurst({ dur: 0.04, gain: 0.12, freq: 1400, q: 1.5 }); },
+  tankShot() { if (!AU.ctx || G.muted) return; keyUp(0, 0.4, 0.04); noiseBurst({ dur: 0.5, gain: 0.9, type: 'lowpass', freq: 800, freqEnd: 150 }); tone({ f0: 140, f1: 40, dur: 0.4, gain: 0.6 }); },
+  overheat() { tone({ f0: 900, f1: 500, dur: 0.25, gain: 0.2, type: 'square' }); },
+  wreck() { if (!AU.ctx || G.muted) return; keyUp(0, 0.5, 0.04); noiseBurst({ dur: 0.7, gain: 1.0, type: 'lowpass', freq: 900, freqEnd: 120 }); },
+};
+
+// ───────────────────────── TRANSFORMS ─────────────────────────
+function worldToScreen(wx, wy) {
+  const c = G.cam, cs = Math.cos(c.angle), sn = Math.sin(c.angle), dx = wx - c.x, dy = wy - c.y;
+  return { x: W / 2 + c.s * (cs * dx - sn * dy), y: H / 2 + c.s * (sn * dx + cs * dy) };
+}
+function screenToWorld(sx, sy) {
+  const c = G.cam, cs = Math.cos(c.angle), sn = Math.sin(c.angle), dx = (sx - W / 2) / c.s, dy = (sy - H / 2) / c.s;
+  return { x: c.x + cs * dx + sn * dy, y: c.y - sn * dx + cs * dy };
+}
+
+// ───────────────────────── RADIO ─────────────────────────
+function radio(who, text, force = false) {
+  if (!force && G.time - G.lastRadio < 2.5) { if (G.subQueue.length < 3) G.subQueue.push({ who, text }); return; }
+  G.subtitle = { who, text, t: 0 }; G.lastRadio = G.time; SFX.radio();
+}
+const LINES = {
+  start: ['AC-130 TV: Sensors up. We have eyes on the friendly position. Standing by for tasking.'],
+  wave: ['AC-130 FCO: Got multiple personnel moving toward the friendly position. You are cleared hot.',
+    'AC-130 TV: Another group coming in from the treeline. Engage at will.',
+    'AC-130 FCO: Heavy movement on all sides. Weapons free, weapons free.',
+    'AC-130 NAV: They are massing for a push. Keep them off that building.'],
+  vehicle: ['AC-130 TV: Vehicle inbound. Recommend the one-oh-five for that one.', 'AC-130 FCO: Armour moving up. Put the big gun on it.', 'AC-130 TV: Troop truck coming in. Hit it before they dismount.'],
+  tank: ['AC-130 FCO: Tank on the road, moving toward the friendlies. That is a one-oh-five target only.', 'AC-130 TV: Heavy armour. The twenty-five will not touch that. Use the big gun.'],
+  good: ['AC-130 TV: Good hit. Good hit.', 'AC-130 TV: Direct hit. That will do it.', 'AC-130 FCO: Nice shooting. Keep it up.', 'AC-130 TV: Ka-boom. Nothing left of that one.'],
+  overrun: ['GROUND: We are taking fire! Danger close, danger close!', 'GROUND: They are right on top of us! Where is that gunship?!'],
+  clear: ['AC-130 FCO: Area looks clear. Good work, keep scanning.', 'AC-130 TV: No movement. Scanning for more.'],
+  fail: ['GROUND: Position is overrun— (transmission ends)'],
+  shot: ['AC-130 FCO: One-oh-five, shot.'], splash: ['AC-130 FCO: Splash.'],
+};
+const pick = a => a[Math.floor(Math.random() * a.length)];
+
+// ───────────────────────── GAME FLOW ─────────────────────────
+function resetGame() {
+  Object.assign(G, { time: 0, wave: 0, score: 0, kills: 0, waveState: 'intermission', waveTimer: 3, enemies: [], marks: [], fx: [], shots: [], spawnQueue: [],
+    weapon: 0, heat: 0, overheated: false, reload: 0, shellInFlight: false, shake: 0, white: 0, subQueue: [], lastRadio: -10, paused: false });
+  G.base.hp = G.base.maxHp; G.cam.x = G.base.x; G.cam.y = G.base.y; G.cam.zoom = 1; G.cam.s = G.cam.s0;
+  G.mode = 'playing';
+  radio('', pick(LINES.start), true);
+}
+function startWave() {
+  G.wave++; G.waveState = 'active'; G.spawnQueue = [];
+  const n = G.wave;
+  const inf = 8 + 4 * n, tech = n >= 2 ? Math.floor((n - 1) * 1.2) : 0, apc = n >= 4 ? n - 3 : 0, truck = n >= 2 ? Math.floor(n / 2) : 0, tank = n >= 5 ? Math.floor((n - 3) / 2) : 0;
+  const span = 11 + n * 1.5; let t = 0.3;
+  for (let s = 0; s < inf; s += 4) { const ang = Math.random() * Math.PI * 2; const cnt = Math.min(4, inf - s);
+    for (let k = 0; k < cnt; k++) G.spawnQueue.push({ t: t + k * 0.35, type: 'inf', ang: ang + (Math.random() - 0.5) * 0.12 });
+    t += span / Math.ceil(inf / 4); }
+  for (let k = 0; k < tech; k++) G.spawnQueue.push({ t: 2 + Math.random() * span, type: 'tech', ang: Math.random() * Math.PI * 2 });
+  for (let k = 0; k < apc; k++) G.spawnQueue.push({ t: 4 + Math.random() * span, type: 'apc', ang: Math.random() * Math.PI * 2 });
+  for (let k = 0; k < truck; k++) G.spawnQueue.push({ t: 2 + Math.random() * span, type: 'truck', ang: Math.random() * Math.PI * 2 });
+  for (let k = 0; k < tank; k++) G.spawnQueue.push({ t: 5 + Math.random() * span, type: 'tank', ang: Math.random() * Math.PI * 2 });
+  G.spawnQueue.sort((a, b) => a.t - b.t); G.waveTimer = 0;
+  radio('', LINES.wave[Math.min(LINES.wave.length - 1, n - 1)], true);
+  if (tank > 0) setTimeout(() => radio('', pick(LINES.tank)), 5000); else if (tech + apc + truck > 0) setTimeout(() => radio('', pick(LINES.vehicle)), 5000);
+}
+function spawn(type, ang) {
+  const T = ETYPES[type], dist = G.rMax + 60 + Math.random() * 100;
+  const e = { type, T, x: G.base.x + Math.cos(ang) * dist, y: G.base.y + Math.sin(ang) * dist, hp: T.hp,
+    range: T.range[0] + Math.random() * (T.range[1] - T.range[0]), speed: T.speed * (0.85 + Math.random() * 0.3),
+    heading: ang + Math.PI, fireT: Math.random(), panic: 0, panicDir: 0, phase: Math.random() * 10, alive: true, dying: 0, cargo: T.carries || 0, unloadT: 0, barrel: 0 };
+  G.enemies.push(e);
+}
+
+// ───────────────────────── WEAPONS ─────────────────────────
+function fireGun() {
+  const w = WEAPONS[0], o = screenToWorld(W * 0.18, -80);
+  const a = Math.random() * Math.PI * 2, rr = Math.sqrt(Math.random()) * w.spread * (0.6 + G.spreadT);
+  const tx = G.cam.x + Math.cos(a) * rr, ty = G.cam.y + Math.sin(a) * rr;
+  G.shots.push({ kind: 'gun', x0: o.x, y0: o.y, x1: tx, y1: ty, t: 0, dur: w.travel });
+  G.heat = Math.min(1, G.heat + 1 / 60); G.spreadT = Math.min(1, G.spreadT + 0.05); G.shake = Math.max(G.shake, 1.2);
+  if (G.heat >= 1) { G.overheated = true; SFX.overheat(); }
+  SFX.gun();
+}
+function fire105() {
+  const o = screenToWorld(W * 0.1, -120);
+  G.shots.push({ kind: 'shell', x0: o.x, y0: o.y, x1: G.cam.x, y1: G.cam.y, t: 0, dur: WEAPONS[1].travel });
+  G.reload = WEAPONS[1].reload; G.shellInFlight = true; G.shake = Math.max(G.shake, 6);
+  SFX.shot105(); radio('', LINES.shot[0], true);
+}
+function impactSmall(x, y) {
+  G.fx.push({ kind: 'flash', x, y, t: 0, life: 0.16, r: 14 });
+  G.fx.push({ kind: 'cloud', x: x + (Math.random() - 0.5) * 6, y: y + (Math.random() - 0.5) * 6, vx: (Math.random() - 0.5) * 12, vy: (Math.random() - 0.5) * 12, t: 0, life: 1.2, r: 14, a: 0.35 });
+  for (let i = 0; i < 3; i++) { const a = Math.random() * Math.PI * 2, v = 40 + Math.random() * 90;
+    G.fx.push({ kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, life: 0.35 + Math.random() * 0.3 }); }
+  addMark({ kind: 'scorch', x, y, life: 30, r: 4 + Math.random() * 3 });
+  for (const e of G.enemies) if (e.alive && Math.hypot(e.x - x, e.y - y) < WEAPONS[0].splash + e.T.r) damage(e, GUN_DMG[e.type], 'gun');
+  SFX.gunHit(0);
+}
+function impactBig(x, y) {
+  G.fx.push({ kind: 'boom', x, y, t: 0, life: 1.6 });
+  G.fx.push({ kind: 'ring', x, y, t: 0, life: 0.9 });
+  for (let i = 0; i < 14; i++) { const a = Math.random() * Math.PI * 2, v = 20 + Math.random() * 70;
+    G.fx.push({ kind: 'cloud', x: x + Math.cos(a) * 10, y: y + Math.sin(a) * 10, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, life: 3.5 + Math.random() * 3, r: 40 + Math.random() * 40, a: 0.5 }); }
+  for (let i = 0; i < 34; i++) { const a = Math.random() * Math.PI * 2, v = 90 + Math.random() * 260;
+    G.fx.push({ kind: 'spark', x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, t: 0, life: 0.6 + Math.random() * 0.9, big: true }); }
+  addMark({ kind: 'crater', x, y, life: 150, r: 36 + Math.random() * 8, angle: Math.random() * 6.28 });
+  const R = WEAPONS[1].splash; let killed = 0;
+  for (const e of G.enemies) if (e.alive) {
+    const d = Math.hypot(e.x - x, e.y - y);
+    if (d < R + e.T.r) { const dmg = 40 * Math.pow(1 - d / (R + e.T.r), 0.7) + (e.type === 'inf' ? 5 : 0); if (damage(e, dmg, 'shell')) killed++; }
+    else if (d < R + 180) { e.panic = 1.2 + Math.random(); e.panicDir = Math.atan2(e.y - y, e.x - x) + (Math.random() - 0.5); }
+  }
+  G.shake = Math.max(G.shake, 26); G.white = 1; G.shellInFlight = false;
+  SFX.impact105(0); radio('', LINES.splash[0], true);
+  if (killed >= 3) setTimeout(() => radio('', pick(LINES.good)), 1200);
+}
+function damage(e, dmg, by) {
+  e.hp -= dmg; if (e.hp > 0) { e.hit = 0.15; return false; }
+  e.alive = false; G.kills++; G.score += e.T.score;
+  if (e.type === 'inf') addMark({ kind: 'body', x: e.x, y: e.y, life: 45, angle: Math.random() * 6.28 });
+  else {
+    addMark({ kind: 'wreck', x: e.x, y: e.y, life: 160, angle: e.heading, len: e.T.len, r: e.T.r, type: e.type });
+    G.fx.push({ kind: 'boom', x: e.x, y: e.y, t: 0, life: 0.9, small: true }); SFX.wreck();
+    const surv = by === 'gun' ? (e.type === 'tech' ? 2 : e.type === 'truck' ? Math.min(3, e.cargo) : 0) : 0;
+    for (let k = 0; k < surv; k++) dismount(e, true);
+  }
+  return true;
+}
+function dismount(e, panic) {
+  spawn('inf', 0); const s = G.enemies[G.enemies.length - 1];
+  const bx = -Math.cos(e.heading) * e.T.len * 0.55, by = -Math.sin(e.heading) * e.T.len * 0.55;
+  s.x = e.x + bx + (Math.random() - 0.5) * 14; s.y = e.y + by + (Math.random() - 0.5) * 14;
+  if (panic) { s.panic = 1.5; s.panicDir = Math.random() * 6.28; }
+}
+function addMark(m) { m.t = 0; G.marks.push(m); if (G.marks.length > 400) G.marks.shift(); }
+
+// ───────────────────────── UPDATE ─────────────────────────
+function update(dt) {
+  G.time += dt;
+  const c = G.cam;
+  c.angle += dt * 0.011;                       // gunship orbit → picture slowly rotates
+  // slew toward mouse (crosshair fixed at screen centre)
+  const ax = (G.mouse.x - W / 2) / (H / 2) * G.rMax, ay = (G.mouse.y - H / 2) / (H / 2) * G.rMax;
+  let m = Math.hypot(ax, ay); const k = m > G.rMax ? G.rMax / m : 1;
+  const cs = Math.cos(c.angle), sn = Math.sin(c.angle);
+  const tx = G.base.x + (cs * ax * k + sn * ay * k), ty = G.base.y + (-sn * ax * k + cs * ay * k);
+  const lerp = 1 - Math.exp(-dt * 22);
+  c.x += (tx - c.x) * lerp; c.y += (ty - c.y) * lerp;
+  c.s += (c.s0 * c.zoom - c.s) * (1 - Math.exp(-dt * 6));
+  G.alt += (Math.sin(G.time * 0.2) * 40 + (Math.random() - 0.5) * 6 - (G.alt - 5089)) * dt;
+
+  // weapons
+  G.gunAcc += dt;
+  if (G.mouse.down && G.mode === 'playing') {
+    if (G.weapon === 0 && !G.overheated) { const per = 60 / WEAPONS[0].rpm; while (G.gunAcc >= per) { G.gunAcc -= per; fireGun(); } }
+    else if (G.weapon === 1 && G.reload <= 0) fire105();
+  } else G.gunAcc = Math.min(G.gunAcc, 0.1);
+  if (!G.mouse.down || G.weapon !== 0) { G.heat = Math.max(0, G.heat - dt * 0.22); G.spreadT = Math.max(0, G.spreadT - dt * 2); }
+  if (G.overheated && G.heat < 0.35) G.overheated = false;
+  G.reload = Math.max(0, G.reload - dt);
+
+  // shots
+  for (let i = G.shots.length - 1; i >= 0; i--) { const s = G.shots[i]; s.t += dt;
+    if (s.t >= s.dur) { G.shots.splice(i, 1); if (s.kind === 'gun') impactSmall(s.x1, s.y1); else impactBig(s.x1, s.y1); } }
+
+  // enemies
+  if (G.mode === 'playing') {
+    if (G.waveState === 'intermission') { G.waveTimer -= dt; if (G.waveTimer <= 0) startWave(); }
+    else { G.waveTimer += dt;
+      while (G.spawnQueue.length && G.spawnQueue[0].t <= G.waveTimer) { const q = G.spawnQueue.shift(); spawn(q.type, q.ang); }
+      if (!G.spawnQueue.length && !G.enemies.some(e => e.alive)) { G.waveState = 'intermission'; G.waveTimer = 5; G.score += 500 * G.wave;
+        G.base.hp = Math.min(G.base.maxHp, G.base.hp + 15); radio('', pick(LINES.clear), true); }
+    }
+  }
+  let underFire = 0;
+  for (const e of G.enemies) {
+    if (!e.alive) continue;
+    e.hit = Math.max(0, (e.hit || 0) - dt);
+    const dx = G.base.x - e.x, dy = G.base.y - e.y, d = Math.hypot(dx, dy), toBase = Math.atan2(dy, dx);
+    let want = e.heading, mv = 0;
+    if (e.panic > 0) { e.panic -= dt; want = e.panicDir; mv = e.speed * (e.type === 'inf' ? 2.3 : 1.4); }
+    else if (d > e.range) { want = toBase + (e.type === 'inf' ? Math.sin(G.time * 1.7 + e.phase) * 0.5 : Math.sin(G.time * 0.6 + e.phase) * 0.12); mv = e.speed; }
+    else if (e.type === 'truck') {
+      want = toBase; e.unloadT -= dt;
+      if (e.cargo > 0 && e.unloadT <= 0) { e.unloadT = 0.6; e.cargo--; dismount(e, false); }
+    }
+    else {
+      want = toBase; e.fireT -= dt; underFire++; e.barrel = Math.max(0, e.barrel - dt);
+      if (e.fireT <= 0) { e.fireT = 1 / e.T.rate * (0.7 + Math.random() * 0.6); G.base.hp -= e.T.dmg;
+        const tank = e.type === 'tank', mx = e.x + Math.cos(e.heading) * (tank ? e.T.len * 0.75 : e.T.r), my = e.y + Math.sin(e.heading) * (tank ? e.T.len * 0.75 : e.T.r);
+        G.fx.push({ kind: 'tracer', x0: mx, y0: my, x1: G.base.x + (Math.random() - 0.5) * 24, y1: G.base.y + (Math.random() - 0.5) * 24, t: 0, life: tank ? 0.12 : 0.07 });
+        G.fx.push({ kind: 'flash', x: mx, y: my, t: 0, life: tank ? 0.18 : 0.06, r: e.type === 'inf' ? 5 : tank ? 26 : 9 });
+        if (tank) { e.barrel = 1.5; G.fx.push({ kind: 'flash', x: G.base.x + (Math.random() - 0.5) * 30, y: G.base.y + (Math.random() - 0.5) * 30, t: 0, life: 0.4, r: 30 }); G.shake = Math.max(G.shake, 4); SFX.tankShot(); }
+        else if (Math.random() < 0.25) SFX.enemyShot(); }
+    }
+    let da = ((want - e.heading + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+    e.heading += da * Math.min(1, dt * (e.type === 'inf' ? 8 : 2.5));
+    if (mv) { e.x += Math.cos(e.heading) * mv * dt; e.y += Math.sin(e.heading) * mv * dt; e.walk = (e.walk || 0) + mv * dt; }
+    e.x = Math.max(20, Math.min(WORLD - 20, e.x)); e.y = Math.max(20, Math.min(WORLD - 20, e.y));
+  }
+  if (underFire && G.time - G.lastRadio > 9 && Math.random() < dt * 0.15) radio('', pick(LINES.overrun));
+  if (G.base.hp <= 0) { G.base.hp = 0; if (G.mode === 'playing') { G.mode = 'gameover'; radio('', LINES.fail[0], true); } }
+  if (G.enemies.length > 400) G.enemies = G.enemies.filter(e => e.alive);
+
+  // fx
+  for (let i = G.fx.length - 1; i >= 0; i--) { const f = G.fx[i]; f.t += dt; if (f.kind === 'spark' || f.kind === 'cloud') { f.x += f.vx * dt; f.y += f.vy * dt; const dr = f.kind === 'cloud' ? Math.exp(-dt * 1.2) : 0.94; f.vx *= dr; f.vy *= dr; } if (f.t >= f.life) G.fx.splice(i, 1); }
+  for (let i = G.marks.length - 1; i >= 0; i--) { const mk = G.marks[i]; mk.t += dt; if (mk.t >= mk.life) G.marks.splice(i, 1); }
+  G.shake *= Math.exp(-dt * 7); G.white *= Math.exp(-dt * 4.5);
+  G.glitchT -= dt; if (G.glitchT <= 0) { G.glitch = 0.6 + Math.random(); G.glitchT = 9 + Math.random() * 14; } G.glitch = Math.max(0, G.glitch - dt);
+
+  // subtitles
+  G.subtitle.t += dt;
+  if (G.subtitle.t > 4.5 && G.subQueue.length) { const q = G.subQueue.shift(); radio(q.who, q.text, true); }
+}
+
+// ───────────────────────── RENDER: SCENE ─────────────────────────
+function render() {
+  const x = sctx, c = G.cam;
+  x.setTransform(DPR, 0, 0, DPR, 0, 0);
+  x.fillStyle = '#000'; x.fillRect(0, 0, W, H);
+  if (!G.world) return;
+  const shx = (Math.random() - 0.5) * G.shake, shy = (Math.random() - 0.5) * G.shake;
+  const jx = Math.sin(G.time * 2.3) * 1.2 + Math.sin(G.time * 7.1) * 0.5, jy = Math.cos(G.time * 1.9) * 1.2;
+  x.save();
+  x.translate(W / 2 + shx + jx, H / 2 + shy + jy); x.rotate(c.angle); x.scale(c.s, c.s); x.translate(-c.x, -c.y);
+  x.imageSmoothingEnabled = true;
+  x.drawImage(G.world, 0, 0);
+
+  // persistent heat marks
+  for (const m of G.marks) {
+    const k = m.t / m.life;
+    if (m.kind === 'scorch') { x.globalAlpha = 0.35 * (1 - k); x.fillStyle = '#000'; x.beginPath(); x.arc(m.x, m.y, m.r, 0, 6.28); x.fill();
+      if (m.t < 3) { x.globalAlpha = (1 - m.t / 3) * 0.9; x.drawImage(SPR.dot, m.x - 8, m.y - 8, 16, 16); } }
+    else if (m.kind === 'body') { x.save(); x.translate(m.x, m.y); x.rotate(m.angle); x.globalAlpha = Math.pow(1 - k, 1.4) * 0.95;
+      const fr = INF_FR[0]; x.drawImage(fr.cv, -fr.w / 2, -fr.h / 2, fr.w, fr.h); x.restore(); }
+    else if (m.kind === 'wreck') { x.save(); x.translate(m.x, m.y); x.rotate(m.angle); const sp = VEH[m.type] || VEH.tech;
+      x.globalAlpha = 0.5; x.fillStyle = '#000'; x.beginPath(); x.ellipse(0, 0, m.len * 1.1, m.r * 1.9, 0, 0, 6.28); x.fill();
+      const fl = 0.7 + 0.3 * Math.sin(G.time * 17 + m.x) * Math.sin(G.time * 23), hot = Math.pow(1 - k, 0.8);
+      x.globalAlpha = 0.35 + 0.65 * hot; x.drawImage(sp.cv, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
+      x.globalAlpha = hot * fl * 0.9; x.drawImage(SPR.flash, -m.len * 0.7, -m.len * 0.7, m.len * 1.4, m.len * 1.4);
+      x.globalAlpha = hot * 0.6; x.drawImage(SPR.soft, -m.len * 2, -m.len * 2, m.len * 4, m.len * 4);
+      if (m.t < 25) { const r = m.len * (0.8 + m.t * 0.12); x.globalAlpha = (1 - m.t / 25) * 0.35 * fl; x.drawImage(SPR.soft, -r + Math.sin(G.time) * 4, -r, r * 2, r * 2); }   // smoke column
+      x.restore(); }
+    else if (m.kind === 'crater') { x.save(); x.translate(m.x, m.y); x.rotate(m.angle);
+      x.globalAlpha = 0.55; x.fillStyle = '#000'; x.beginPath(); x.ellipse(0, 0, m.r, m.r * 0.85, 0, 0, 6.28); x.fill();
+      x.globalAlpha = 0.25; x.fillStyle = '#111'; x.beginPath(); x.ellipse(0, 0, m.r * 1.6, m.r * 1.4, 0, 0, 6.28); x.fill();
+      const hot = Math.max(0, 1 - m.t / 40); x.globalAlpha = hot * 0.9 * (0.75 + 0.25 * Math.sin(G.time * 11 + m.y));
+      x.drawImage(SPR.flash, -m.r, -m.r, m.r * 2, m.r * 2); x.restore(); }
+  }
+  x.globalAlpha = 1;
+
+  // friendly position: IR strobes
+  const b = G.base;
+  x.globalAlpha = 0.5; x.drawImage(SPR.soft, b.x - 26, b.y - 26, 52, 52);
+  for (let i = 0; i < 3; i++) { const on = ((G.time * 2.2 + i * 0.33) % 1) < 0.12; const px = b.x + [-14, 12, 2][i], py = b.y + [-8, -10, 14][i];
+    x.globalAlpha = on ? 1 : 0.45; x.drawImage(on ? SPR.flash : SPR.dot, px - (on ? 16 : 6), py - (on ? 16 : 6), on ? 32 : 12, on ? 32 : 12); }
+  x.globalAlpha = 1;
+
+  // enemies
+  for (const e of G.enemies) {
+    if (!e.alive) continue;
+    x.save(); x.translate(e.x, e.y); x.rotate(e.heading);
+    if (e.type === 'inf') {
+      const fr = INF_FR[Math.floor((e.walk || 0) * 0.45) & 3];
+      x.globalAlpha = 0.7; x.drawImage(SPR.soft, -18, -18, 36, 36);
+      x.globalAlpha = 1; x.drawImage(fr.cv, -fr.w / 2, -fr.h / 2, fr.w, fr.h);
+    } else {
+      const L = e.T.len, sp = VEH[e.type];
+      x.globalAlpha = 0.9; x.drawImage(SPR.soft, -L * 1.3, -L * 1.3, L * 2.6, L * 2.6);
+      x.globalAlpha = 1; x.drawImage(sp.cv, -sp.w / 2, -sp.h / 2, sp.w, sp.h);
+      if (e.type === 'tank' && e.barrel > 0) { x.globalAlpha = e.barrel * 0.5; x.fillStyle = '#fff'; x.fillRect(6, -1.4, 22, 2.8); }   // barrel cooling after a shot
+      if (e.type === 'truck' && e.cargo > 0 && e.unloadT > 0) { x.globalAlpha = 0.8; x.drawImage(SPR.dot, -L * 0.6 - 6, -6, 12, 12); }
+      if (e.hit > 0) { x.globalAlpha = e.hit * 5; x.drawImage(SPR.flash, -L * 0.6, -L * 0.6, L * 1.2, L * 1.2); }
+    }
+    x.restore();
+  }
+  x.globalAlpha = 1;
+
+  // enemy tracers + fx
+  x.lineCap = 'round';
+  for (const f of G.fx) {
+    const k = f.t / f.life;
+    if (f.kind === 'tracer') { x.globalAlpha = 0.5 * (1 - k); x.strokeStyle = '#fff'; x.lineWidth = 1; x.beginPath(); x.moveTo(f.x0, f.y0); x.lineTo(f.x1, f.y1); x.stroke(); }
+    else if (f.kind === 'flash') { x.globalAlpha = 1 - k; const r = f.r * (1 + k * 2); x.drawImage(SPR.flash, f.x - r, f.y - r, r * 2, r * 2); }
+    else if (f.kind === 'spark') { x.globalAlpha = (1 - k) * 0.9; const r = f.big ? 4 : 2; x.drawImage(SPR.dot, f.x - r, f.y - r, r * 2, r * 2); }
+    else if (f.kind === 'boom') { const R = f.small ? 60 : 170; const grow = Math.min(1, f.t / 0.3); const r = R * (0.3 + 0.7 * Math.pow(grow, 0.45)) * (1 + k * 0.5);
+      x.globalAlpha = Math.pow(1 - k, 1.3); x.drawImage(SPR.big, f.x - r, f.y - r, r * 2, r * 2);
+      const rc = r * (0.55 - 0.35 * k); x.globalAlpha = Math.pow(1 - k, 0.7); x.drawImage(SPR.fire, f.x - rc, f.y - rc, rc * 2, rc * 2);
+      x.globalAlpha = Math.pow(1 - k, 2.5) * 0.9; x.drawImage(SPR.soft, f.x - r * 2.2, f.y - r * 2.2, r * 4.4, r * 4.4); }
+    else if (f.kind === 'cloud') { const r = f.r * (0.6 + 0.8 * Math.pow(k, 0.5)); x.globalAlpha = f.a * (1 - k) * (1 - k); x.drawImage(SPR.soft, f.x - r, f.y - r, r * 2, r * 2); }
+    else if (f.kind === 'ring') { x.globalAlpha = (1 - k) * 0.7; x.strokeStyle = '#fff'; x.lineWidth = 2 + 6 * (1 - k); x.beginPath(); x.arc(f.x, f.y, 20 + 240 * Math.pow(k, 0.55), 0, 6.28); x.stroke(); }
+  }
+  // own rounds
+  for (const s of G.shots) {
+    if (s.kind === 'gun') { const k = s.t / s.dur, k0 = Math.max(0, k - 0.2);
+      const ex = s.x0 + (s.x1 - s.x0) * k, ey = s.y0 + (s.y1 - s.y0) * k, bx = s.x0 + (s.x1 - s.x0) * k0, by = s.y0 + (s.y1 - s.y0) * k0;
+      x.globalAlpha = 1; x.strokeStyle = '#fff'; x.lineWidth = 2.2 / c.s + 0.6; x.beginPath(); x.moveTo(bx, by); x.lineTo(ex, ey); x.stroke();
+      x.globalAlpha = 0.6; x.drawImage(SPR.dot, ex - 5, ey - 5, 10, 10); }
+    else { // 105 round: arcs in from the gun side, apparent size shrinks as it drops toward the ground
+      const k = s.t / s.dur, e = 1 - Math.pow(1 - k, 2.2);                            // decelerating apparent motion (falling away from the sensor)
+      const px = s.x1 - s.x0, py = s.y1 - s.y0, nx = -py, ny = px, bow = Math.sin(k * Math.PI) * 0.18;
+      const rx = s.x0 + px * e + nx * bow, ry = s.y0 + py * e + ny * bow;
+      const size = (16 - 12 * k) / c.s + 3;
+      for (let i = 1; i <= 5; i++) { const kk = Math.max(0, k - i * 0.035), ee = 1 - Math.pow(1 - kk, 2.2), bb = Math.sin(kk * Math.PI) * 0.18;
+        const tx = s.x0 + px * ee + nx * bb, ty = s.y0 + py * ee + ny * bb, ts = size * (1 - i * 0.15);
+        x.globalAlpha = 0.35 * (1 - i / 6); x.drawImage(SPR.dot, tx - ts, ty - ts, ts * 2, ts * 2); }
+      x.globalAlpha = 1; x.drawImage(SPR.round, rx - size, ry - size, size * 2, size * 2);
+      x.globalAlpha = 0.7; x.drawImage(SPR.soft, rx - size * 3, ry - size * 3, size * 6, size * 6);
+    }
+  }
+  x.globalAlpha = 1;
+  x.restore();
+
+  // sensor artefacts (screen space)
+  x.setTransform(DPR, 0, 0, DPR, 0, 0);
+  if (!noisePat) noisePat = x.createPattern(noiseCv, 'repeat');
+  x.save(); x.globalAlpha = 0.085; x.fillStyle = noisePat;
+  const nx = Math.floor(Math.random() * 256), ny = Math.floor(Math.random() * 256); x.translate(-nx, -ny); x.fillRect(nx, ny, W, H); x.restore();
+  if (G.glitch > 0) { const yy = ((G.time * 260) % (H + 80)) - 40; const g = x.createLinearGradient(0, yy - 30, 0, yy + 30);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(0.5, `rgba(255,255,255,${0.10 * G.glitch})`); g.addColorStop(1, 'rgba(255,255,255,0)');
+    x.fillStyle = g; x.fillRect(0, yy - 30, W, 60); }
+  // vignette
+  x.drawImage(vignetteCv, 0, 0, W, H);
+  if (G.white > 0.01) { x.fillStyle = `rgba(255,255,255,${Math.min(0.85, G.white * 0.85)})`; x.fillRect(0, 0, W, H); }
+}
+
+// ───────────────────────── RENDER: HUD ─────────────────────────
+const FONT = '600 17px "DIN Alternate","Bahnschrift","Avenir Next Condensed","Roboto Condensed","Arial Narrow",Arial,sans-serif';
+function txt(s, x, y, size = 17, align = 'left', alpha = 1) {
+  hctx.font = FONT.replace('17px', size + 'px'); hctx.textAlign = align; hctx.globalAlpha = alpha; hctx.fillText(s, x, y); hctx.globalAlpha = 1;
+}
+function renderHUD() {
+  const x = hctx; x.setTransform(DPR, 0, 0, DPR, 0, 0); x.clearRect(0, 0, W, H);
+  if (G.mode === 'menu' || G.mode === 'loading') return;
+  x.fillStyle = '#f4f4f4'; x.strokeStyle = '#f4f4f4'; x.shadowColor = 'rgba(0,0,0,0.9)'; x.shadowBlur = 4; x.textBaseline = 'middle'; x.lineWidth = 1.4;
+  const cx = W / 2, cy = H / 2;
+  // crosshair
+  x.beginPath();
+  x.moveTo(cx, cy - 290); x.lineTo(cx, cy - 14); x.moveTo(cx, cy + 14); x.lineTo(cx, cy + 290);
+  x.moveTo(cx - 310, cy); x.lineTo(cx - 14, cy); x.moveTo(cx + 14, cy); x.lineTo(cx + 310, cy);
+  for (let i = 1; i <= 4; i++) { const t = i * 70, hl = i % 2 ? 6 : 10; x.moveTo(cx - hl, cy - t); x.lineTo(cx + hl, cy - t); x.moveTo(cx - hl, cy + t); x.lineTo(cx + hl, cy + t); }
+  for (let i = 1; i <= 4; i++) { const t = i * 75, hl = i % 2 ? 6 : 10; x.moveTo(cx - t, cy - hl); x.lineTo(cx - t, cy + hl); x.moveTo(cx + t, cy - hl); x.lineTo(cx + t, cy + hl); }
+  x.stroke();
+  x.fillRect(cx - 1, cy - 1, 2, 2);
+
+  // left column (sensor modes, like the real HUD)
+  const wname = WEAPONS[G.weapon].name;
+  txt('A-G', 96, 44, 22); txt('MAN', 160, 44, 22); txt(G.polarity === 'WHOT' ? 'NARO' : 'WIDE', 236, 44, 22);
+  txt('GRAY', 18, 96, 22); txt('FF 30', 18, 140, 22); txt('IR', 18, 184, 22); txt('BORE', 18, 228, 22);
+  txt(`${G.cam.zoom > 1 ? 'ZOOM 2' : 'ZOOM 1'}`, 18, 272, 18, 'left', 0.8);
+  txt(wname, 18, H - 60, 30);
+  txt(G.weapon === 0 ? '105 mm' : '25 mm', 18, H - 26, 16, 'left', 0.45);
+  // gun heat / reload readouts
+  if (G.weapon === 0) { x.globalAlpha = 0.9; x.strokeRect(120, H - 68, 120, 8); x.fillRect(122, H - 66, 116 * G.heat, 4);
+    txt(G.overheated ? 'OVERHEAT' : 'GUN READY', 250, H - 63, 15, 'left', G.overheated ? (Math.sin(G.time * 12) > 0 ? 1 : 0.3) : 0.8); }
+  else { txt(G.reload > 0 ? (G.shellInFlight ? 'ROUND IN FLIGHT' : `RELOADING ${G.reload.toFixed(1)}`) : 'HOWITZER READY', 120, H - 63, 15, 'left', 0.9); }
+  txt('LMB FIRE · RMB SWITCH · Z ZOOM · B POLARITY', 18, H - 8, 11, 'left', 0.35);
+
+  // top-right: nav block
+  txt(G.polarity, W - 150, 84, 22, 'right');
+  txt(`${Math.round(G.alt)} AGL`, W - 18, 44, 22, 'right');
+  txt(G.grid, W - 18, 84, 15, 'right', 0.75);   // decoy grid — real coordinates are never shown
+  const hdg = ((-G.cam.angle * 180 / Math.PI) % 360 + 360) % 360;
+  txt(`HDG ${String(Math.round(hdg)).padStart(3, '0')}`, W - 18, 108, 15, 'right', 0.75);
+  txt(G.loc.name.toUpperCase().slice(0, 34), W - 18, 130, 13, 'right', 0.55);
+  // right column letters
+  'N T S F Q Z T G T'.split(' ').forEach((ch, i) => txt(ch, W - 24, 200 + i * 44, 22, 'center', 0.9));
+  // north arrow
+  x.save(); x.translate(W - 60, 44); x.rotate(-G.cam.angle); x.beginPath(); x.moveTo(0, -12); x.lineTo(5, 6); x.lineTo(0, 2); x.lineTo(-5, 6); x.closePath(); x.fill(); x.restore();
+  txt('N', W - 60, 68, 13, 'center', 0.7);
+
+  // centre-top: mission state
+  txt(`WAVE ${G.wave}`, cx, 30, 22, 'center');
+  txt(`SCORE ${G.score}`, cx - 140, 30, 16, 'center', 0.8); txt(`KIA ${G.kills}`, cx + 140, 30, 16, 'center', 0.8);
+  const alive = G.enemies.filter(e => e.alive).length + G.spawnQueue.length;
+  if (G.waveState === 'active') txt(`HOSTILES ${alive}`, cx, 56, 15, 'center', 0.7);
+  else if (G.mode === 'playing') txt(`NEXT WAVE IN ${Math.ceil(G.waveTimer)}`, cx, 56, 15, 'center', 0.7);
+
+  // base integrity (bottom right)
+  const bw = 220, bx = W - 18 - bw, by = H - 60;
+  const hpk = G.base.hp / G.base.maxHp;
+  txt('FRIENDLY POSITION', bx, by - 16, 13, 'left', 0.8);
+  x.globalAlpha = 0.9; x.strokeRect(bx, by - 4, bw, 10);
+  x.globalAlpha = hpk < 0.3 ? (Math.sin(G.time * 10) > 0 ? 1 : 0.4) : 0.95; x.fillRect(bx + 2, by - 2, (bw - 4) * hpk, 6); x.globalAlpha = 1;
+  txt(`${Math.ceil(G.base.hp)}%`, W - 18, by + 18, 14, 'right', 0.8);
+
+  // friendly marker label (follows the world point)
+  const bp = worldToScreen(G.base.x, G.base.y);
+  if (bp.x > 0 && bp.x < W && bp.y > 0 && bp.y < H) { x.globalAlpha = 0.85; x.strokeRect(bp.x - 22, bp.y - 22, 44, 44); txt('FRIENDLY', bp.x, bp.y - 32, 12, 'center', 0.85); }
+  // TGT tag when crosshair is near a hostile
+  let near = null, nd = 40;
+  for (const e of G.enemies) if (e.alive) { const p = worldToScreen(e.x, e.y); const d = Math.hypot(p.x - cx, p.y - cy); if (d < nd) { nd = d; near = e; } }
+  if (near) txt(`TGT ${near.T.label}`, cx + 22, cy + 22, 13, 'left', 0.8);
+
+  // subtitle (bottom centre, like the footage)
+  if (G.subtitle.text && G.subtitle.t < 5.5) {
+    const a = G.subtitle.t > 4.8 ? (5.5 - G.subtitle.t) / 0.7 : 1;
+    x.font = FONT.replace('17px', '17px'); x.textAlign = 'center';
+    x.globalAlpha = a * 0.55; x.fillStyle = '#9a9a9a'; x.fillText(G.subtitle.text, cx + 1, H - 62 + 1);
+    x.globalAlpha = a; x.fillStyle = '#f4f4f4'; x.fillText(G.subtitle.text, cx, H - 62); x.globalAlpha = 1;
+  }
+  x.fillStyle = '#f4f4f4';
+  if (G.mode === 'gameover') {
+    x.fillStyle = 'rgba(0,0,0,0.55)'; x.fillRect(0, cy - 110, W, 220); x.fillStyle = '#f4f4f4';
+    txt('POSITION OVERRUN', cx, cy - 40, 48, 'center'); txt(`WAVES HELD ${G.wave - 1}   ·   KIA ${G.kills}   ·   SCORE ${G.score}`, cx, cy + 12, 20, 'center', 0.9);
+    txt('PRESS R TO RE-ENGAGE', cx, cy + 60, 16, 'center', Math.sin(G.time * 4) > 0 ? 1 : 0.4);
+  } else if (G.paused) { x.fillStyle = 'rgba(0,0,0,0.55)'; x.fillRect(0, cy - 40, W, 80); x.fillStyle = '#f4f4f4'; txt('PAUSED', cx, cy, 36, 'center'); }
+  x.shadowBlur = 0;
+}
+
+// ───────────────────────── LOOP ─────────────────────────
+let last = performance.now();
+function frame(now) {
+  let dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (G.mode === 'playing' || G.mode === 'gameover') { if (!G.paused) update(dt); render(); }
+  renderHUD();
+  requestAnimationFrame(frame);
+}
+
+// ───────────────────────── INPUT ─────────────────────────
+playfield.addEventListener('mousemove', e => { G.mouse.x = e.clientX; G.mouse.y = e.clientY; });
+playfield.addEventListener('mousedown', e => {
+  if (e.button === 0) { G.mouse.down = true; G.gunAcc = 60 / WEAPONS[0].rpm; }
+  if (e.button === 2) G.weapon = 1 - G.weapon;
+});
+window.addEventListener('mouseup', e => { if (e.button === 0) G.mouse.down = false; });
+playfield.addEventListener('contextmenu', e => e.preventDefault());
+playfield.addEventListener('wheel', e => { e.preventDefault(); G.cam.zoom = e.deltaY < 0 ? 2.2 : 1; }, { passive: false });
+window.addEventListener('keydown', e => {
+  if (G.mode !== 'playing' && G.mode !== 'gameover') return;
+  const k = e.key.toLowerCase();
+  if (k === '1') G.weapon = 0; else if (k === '2') G.weapon = 1;
+  else if (k === 'z') G.cam.zoom = G.cam.zoom > 1 ? 1 : 2.2;
+  else if (k === 'b') { G.polarity = G.polarity === 'WHOT' ? 'BHOT' : 'WHOT'; sceneCv.classList.toggle('bhot', G.polarity === 'BHOT'); }
+  else if (k === 'p' || k === 'escape') G.paused = !G.paused;
+  else if (k === 'm') { G.muted = !G.muted; if (AU.master) AU.master.gain.value = G.muted ? 0 : 0.6; }
+  else if (k === 'r' && G.mode === 'gameover') resetGame();
+});
+// touch: drag to slew, tap-hold fires
+playfield.addEventListener('touchstart', e => { const t = e.touches[0]; G.mouse.x = t.clientX; G.mouse.y = t.clientY; G.mouse.down = true; e.preventDefault(); }, { passive: false });
+playfield.addEventListener('touchmove', e => { const t = e.touches[0]; G.mouse.x = t.clientX; G.mouse.y = t.clientY; e.preventDefault(); }, { passive: false });
+playfield.addEventListener('touchend', () => { G.mouse.down = false; });
+
+// ───────────────────────── MENU ─────────────────────────
+function menuStatus(s, err) { $('menuStatus').textContent = s; $('menuStatus').classList.toggle('err', !!err); }
+async function begin(lat, lon, name) {
+  G.loc = { lat, lon, name: name || '' }; G.mode = 'loading';
+  const r4 = () => String(Math.floor(Math.random() * 10000)).padStart(4, '0');
+  G.grid = `GRID ${Math.floor(Math.random() * 60) + 1}${'CDEFGHJKLMNPQRSTUVWX'[Math.floor(Math.random() * 20)]} ${'ABCDEFGHJKLMNPQRSTUVWXYZ'[Math.floor(Math.random() * 24)]}${'ABCDEFGHJKLMNPQRSTUV'[Math.floor(Math.random() * 20)]} ${r4()} ${r4()}`;
+  try { await loadWorld(lat, lon); G.mode = 'ready'; }
+  catch (err) { console.error(err); setLoad('FEED LOST', 0, 'Could not load imagery: ' + err.message, true); }
+  if (new URLSearchParams(location.search).has('auto') && G.mode === 'ready') $('btnEngage').click();
+}
+$('btnGeo').addEventListener('click', () => {
+  if (!navigator.geolocation) return menuStatus('GPS unavailable in this browser — try a place search.', true);
+  menuStatus('REQUESTING GPS FIX…');
+  navigator.geolocation.getCurrentPosition(
+    p => begin(p.coords.latitude, p.coords.longitude, 'YOUR POSITION'),
+    err => menuStatus(`GPS FAILED (${err.message}). Use place search or demo.`, true),
+    { enableHighAccuracy: true, timeout: 15000, maximumAge: 60000 });
+});
+$('btnDemo').addEventListener('click', () => begin(DEMO.lat, DEMO.lon, DEMO.name));
+async function searchPlace() {
+  const q = $('placeInput').value.trim(); if (!q) return;
+  menuStatus('SEARCHING…');
+  try {
+    const r = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(q)}`, { headers: { 'Accept': 'application/json' } });
+    const j = await r.json(); if (!j.length) return menuStatus('NO FIX FOR THAT PLACE', true);
+    begin(parseFloat(j[0].lat), parseFloat(j[0].lon), j[0].display_name.split(',').slice(0, 2).join(','));
+  } catch (e) { menuStatus('GEOCODER UNREACHABLE', true); }
+}
+$('btnPlace').addEventListener('click', searchPlace);
+$('placeInput').addEventListener('keydown', e => { if (e.key === 'Enter') searchPlace(); });
+$('btnEngage').addEventListener('click', () => { audioInit(); overlay.classList.add('hidden'); G.mouse.x = W / 2; G.mouse.y = H / 2; resetGame(); });
+
+// boot
+resize(); requestAnimationFrame(frame);
+if (new URLSearchParams(location.search).has('dbg')) { window.__G = G; window.__spawn = spawn; window.__SPR = { VEH, INF_FR }; }
+const qs = new URLSearchParams(location.search);
+if (qs.has('dbg')) { setTimeout(() => { G.mouse.down = true; G.mouse.x = W / 2 + 120; G.mouse.y = H / 2 + 60; }, +qs.get('dbg') * 1000); if (qs.has('shell')) setTimeout(() => { G.weapon = 1; }, +qs.get('shell') * 1000); }
+if (qs.has('lat') && qs.has('lon')) begin(parseFloat(qs.get('lat')), parseFloat(qs.get('lon')), qs.get('name') || 'TARGET AREA');
+})();
+</script>
+</body>
+</html>
