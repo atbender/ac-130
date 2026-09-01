@@ -8,6 +8,8 @@ hostiles closing in on your location. Hold them off with the 25 mm Gatling and t
 
 Single static `index.html`, no build step, no backend, no dependencies.
 
+![Gameplay: 105 mm round in flight over a thermal satellite picture, hostiles closing on the friendly position](docs/demo.gif)
+
 ## Play
 
 Open `index.html` over HTTPS or localhost (browser geolocation needs a secure origin):
